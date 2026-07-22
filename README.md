@@ -10,6 +10,11 @@ Experimental Mechanics 55 (6), 1105-1122
 
 Please cite this paper if you use this software in your research. 
 
+## Changes in this fork
+
+- Supports large (including 8K × 8K) images by using overflow-safe indexing in the region-growing DIC calculation.
+- Improves seed setup: seed locations remain visible in large-image previews, and seeds can be added or adjusted using typed full-resolution X/Y coordinates. Entered coordinates snap automatically to the nearest valid DIC grid point.
+
 # Installation instructions
 
 ```
@@ -29,5 +34,4 @@ If MEX is set up properly, the MEX files associated with the program *should* co
 For convienience, a direct link to the manual is available [here](http://www.ncorr.com/download/ncorrmanual_v1_2_2.pdf) and an instructional step-by-step youtube video is linked below:
 
 [![IMAGE ALT TEXT HERE](http://img.youtube.com/vi/cXfeiBXjN18/0.jpg)](http://www.youtube.com/watch?v=cXfeiBXjN18)
-
 
