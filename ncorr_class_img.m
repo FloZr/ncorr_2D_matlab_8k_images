@@ -88,6 +88,10 @@ classdef ncorr_class_img < handle
 
             % Only set gs and image for 'file', 'load', and 'reduced'
             if (strcmp(type_i,'file') || strcmp(type_i,'load') || strcmp(type_i,'reduced'))
+                if (size(data_i.img,3) == 4)
+                        data_i.img(:,:,4)=[];
+                end
+
                 if (size(data_i.img,3) == 3)
                     % Image is RGB-color
                     % Get image:
@@ -97,7 +101,8 @@ classdef ncorr_class_img < handle
                 else
                     % Image is monochrome
                     % Get image:            
-                    img_prelim = uint8([]); % Must set type and initialize          
+                    img_prelim = uint8([]); % Must set type and initialize    
+                  
                     img_prelim(:,:,1) = im2uint8(data_i.img);     
                     img_prelim(:,:,2) = im2uint8(data_i.img);     
                     img_prelim(:,:,3) = im2uint8(data_i.img);

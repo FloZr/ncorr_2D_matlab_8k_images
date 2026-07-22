@@ -229,6 +229,7 @@ function [displacements,rois_dic,seedinfo,outstate] = ncorr_alg_dicanalysis(imgs
         % out of memory                                
         try
             tic
+            ncorr_debug_dic_diagnostics(imgs,radius,spacing,seedinfo_prelim_f(:,:,i+1),threaddiagram,i);
             % No need to send in the number of regions or total number
             % of threads because this is encoded in the size of the
             % seeds. 
@@ -249,7 +250,7 @@ function [displacements,rois_dic,seedinfo,outstate] = ncorr_alg_dicanalysis(imgs
                                                                        int32(num_img+i), ...
                                                                        int32(total_imgs));       
             toc
-        catch %#ok<CTCH>
+        catch ME
             % Only time an exception is returned is either if rgdic has
             % incorrect inputs, ran out of memory, or there is a bug in 
             % the code. The first option never happens if rgdic
@@ -257,8 +258,17 @@ function [displacements,rois_dic,seedinfo,outstate] = ncorr_alg_dicanalysis(imgs
             % happen and is thus the only real handleable exception 
             % which will get thrown by rgdic. The last case was not
             % intended, so it is not handled here.
-            h_error = errordlg('Ncorr most likely ran out of memory while performing DIC. Please clear memory in workspace, restart Ncorr, or crop/use smaller images before doing analysis.','Error','modal');
+            fprintf(2,'\nNcorr DIC failed with the real MATLAB exception:\n');
+            fprintf(2,'  ME.identifier: %s\n',ME.identifier);
+            fprintf(2,'  ME.message: %s\n',ME.message);
+            fprintf(2,'  ME.stack:\n');
+            for idx_stack = 1:numel(ME.stack)
+                fprintf(2,'    %s at line %d\n',ME.stack(idx_stack).name,ME.stack(idx_stack).line);
+            end
+            h_error = errordlg(sprintf(['Ncorr DIC failed. MATLAB reported:\n\nIdentifier: %s\n\nMessage: %s\n\n', ...
+                                        'See the Command Window for memory diagnostics and stack trace.'],ME.identifier,ME.message),'Error','modal');
             uiwait(h_error);
+            outstate = out.failed;
             return;
         end  
 
@@ -285,4 +295,49 @@ function [displacements,rois_dic,seedinfo,outstate] = ncorr_alg_dicanalysis(imgs
         end
     end
     outstate = out.success;
+end
+
+function ncorr_debug_dic_diagnostics(imgs,radius,spacing,seedinfo_img,threaddiagram,num_dic_img)
+% Print diagnostics immediately before the RG-DIC call. Keep this side-effect
+% only: the original Ncorr data path remains unchanged.
+    fprintf(2,'\n========== Ncorr RG-DIC preflight diagnostics ==========\n');
+    fprintf(2,'DIC image index: %d\n',num_dic_img);
+    ncorr_debug_print_memory();
+    fprintf(2,'Workspace variables in ncorr_alg_dicanalysis before ncorr_alg_rgdic:\n');
+    evalin('caller','whos')
+
+    ref_img = imgs(1).imginfo;
+    def_img = imgs(num_dic_img+2).imginfo;
+    roi_ref = imgs(1).roi;
+    fprintf(2,'Reference image: height=%d width=%d type=%s computationalClass=double displayClass=uint8\n',ref_img.height,ref_img.width,ref_img.type);
+    fprintf(2,'Deformed image:  height=%d width=%d type=%s computationalClass=double displayClass=uint8\n',def_img.height,def_img.width,def_img.type);
+    fprintf(2,'Reference ROI mask size: [%d %d], class=%s, true pixels=%d\n',size(roi_ref.mask,1),size(roi_ref.mask,2),class(roi_ref.mask),nnz(roi_ref.mask));
+    fprintf(2,'Thread diagram size: [%d %d], nonnegative DIC grid points=%d\n',size(threaddiagram,1),size(threaddiagram,2),nnz(threaddiagram >= 0));
+
+    computepoints = [seedinfo_img.computepoints];
+    fprintf(2,'Number of DIC points from seedinfo.computepoints: %d\n',sum(double(computepoints(:))));
+    fprintf(2,'Subset radius: %d\n',radius);
+    fprintf(2,'Subset spacing: %d\n',spacing);
+    fprintf(2,'Strain radius: not available in ncorr_alg_dicanalysis; strain is calculated later.\n');
+
+    ref_pixels = double(ref_img.height)*double(ref_img.width);
+    def_bcoef_h = double(def_img.height) + 2*double(def_img.border_bcoef);
+    def_bcoef_w = double(def_img.width) + 2*double(def_img.border_bcoef);
+    qkbqkt_elems = 36*max(0,def_bcoef_h-5)*max(0,def_bcoef_w-5);
+    fprintf(2,'Estimated rgdic allocations:\n');
+    fprintf(2,'  reference gradients: 2 * imageHeight * imageWidth doubles = %.0f elements, %.3f GiB\n',2*ref_pixels,2*ref_pixels*8/1024^3);
+    fprintf(2,'  QK_B_QKT_buffer: 36 * (defBcoefHeight-5) * (defBcoefWidth-5) doubles = %.0f elements, %.3f GiB\n',qkbqkt_elems,qkbqkt_elems*8/1024^3);
+    fprintf(2,'  int32 max comparison for QK_B_QKT elements: %.0f / %.0f\n',qkbqkt_elems,double(intmax('int32')));
+    if (qkbqkt_elems > double(intmax('int32')))
+        fprintf(2,'  WARNING: QK_B_QKT element count exceeds int32 max; the original C++ expression can overflow before allocation.\n');
+    end
+    fprintf(2,'========================================================\n');
+end
+
+function ncorr_debug_print_memory()
+    try
+        memory
+    catch ME_memory
+        fprintf(2,'MATLAB memory() diagnostic failed: %s\n',ME_memory.message);
+    end
 end

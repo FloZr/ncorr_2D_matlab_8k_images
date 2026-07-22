@@ -8,6 +8,7 @@
 #include <list>
 #include <exception>              // Allow exceptions because this function can allocate a very large chunk of memory for the interpolation lookup table
 #include <complex>
+#include <cstddef>
 #include "standard_datatypes.h"
 #include "ncorr_datatypes.h"
 #include "ncorr_lib.h"
@@ -208,9 +209,18 @@ class_rgdic::class_rgdic(mxArray *plhs[ ],const mxArray *prhs[ ]) {
         // Form Inverse Compositional Buffers ---------------------------//     
         try { 
             // Thread independent:
-            df_dx_buffer.resize(reference[0].gs.height*reference[0].gs.width,0.0);
-            df_dy_buffer.resize(reference[0].gs.height*reference[0].gs.width,0.0);
-            QK_B_QKT_buffer.resize(36*(current[0].bcoef.height-5)*(current[0].bcoef.width-5),0.0); // Very large
+            std::size_t ref_pixels = (std::size_t)reference[0].gs.height*(std::size_t)reference[0].gs.width;
+            std::size_t qkbqkt_height = (std::size_t)(current[0].bcoef.height-5);
+            std::size_t qkbqkt_width = (std::size_t)(current[0].bcoef.width-5);
+            std::size_t qkbqkt_elements = (std::size_t)36*qkbqkt_height*qkbqkt_width;
+            mexPrintf("Ncorr rgdic allocation preflight: refPixels=%llu, QK_B_QKT elements=%llu, QK_B_QKT GiB=%.3f\n",
+                      (unsigned long long)ref_pixels,
+                      (unsigned long long)qkbqkt_elements,
+                      ((double)qkbqkt_elements*8.0)/(1024.0*1024.0*1024.0));
+
+            df_dx_buffer.resize(ref_pixels,0.0);
+            df_dy_buffer.resize(ref_pixels,0.0);
+            QK_B_QKT_buffer.resize(qkbqkt_elements,0.0); // Very large
             
             // Thread dependent:
             g_buffer.resize(total_threads); 
@@ -227,11 +237,11 @@ class_rgdic::class_rgdic(mxArray *plhs[ ],const mxArray *prhs[ ]) {
                 gradient_buffer[i].resize(6,0.0); 
                 hessian_gn_buffer[i].resize(36,0.0); 
             }
-        } catch (std::exception&) {
+        } catch (const std::exception& e) {
             // Program ran out of memory, probably while trying to allocate the interpolation look up table.
             // Use mexErrMsgTxt to return although matlab will handle the exception.
             // This is thread safe since this is single threaded up to this point
-            mexErrMsgTxt("Out of memory.\n");
+            mexErrMsgIdAndTxt("Ncorr:rgdic:allocationFailed","RG-DIC allocation failed: %s",e.what());
         }
         
         // Form/set outputs ---------------------------------------------//
@@ -469,7 +479,8 @@ void class_rgdic::precompute() {
             double b35 = current[0].bcoef.value[(j+5)+(i+5)*current[0].bcoef.height];
 
             //Compute base index
-            int lind_qkbqkt = j*(36)+i*(36*(current[0].bcoef.height-5));
+            std::size_t lind_qkbqkt = (std::size_t)j*(std::size_t)36+
+                                      (std::size_t)i*(std::size_t)36*(std::size_t)(current[0].bcoef.height-5);
 
             //Compute QK_B_QKT vector
             QK_B_QKT_buffer[lind_qkbqkt] = 0.00006944444444444444*b0+0.001805555555555556*b1+0.001805555555555556*b10+0.004583333333333333*b12+0.1191666666666667*b13+0.3025*b14+0.1191666666666667*b15+0.004583333333333333*b16+0.001805555555555556*b18+0.04694444444444444*b19+0.004583333333333333*b2+0.1191666666666667*b20+0.04694444444444444*b21+0.001805555555555556*b22+0.00006944444444444444*b24+0.001805555555555556*b25+0.004583333333333333*b26+0.001805555555555556*b27+0.00006944444444444444*b28+0.001805555555555556*b3+0.00006944444444444444*b4+0.001805555555555556*b6+0.04694444444444444*b7+0.1191666666666667*b8+0.04694444444444444*b9;
@@ -845,7 +856,8 @@ OUT class_rgdic::newton(std::vector<double> &defvector,double &corrcoef,double &
                     y_vec_buffer[num_thread][5] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
                                     
                     // Calculate lind_qkbqkt for QK_B_QKT
-                    int lind_qkbqkt = (top*36)+(left*36*(current[0].bcoef.height-5));
+                    std::size_t lind_qkbqkt = (std::size_t)top*(std::size_t)36+
+                                              (std::size_t)left*(std::size_t)36*(std::size_t)(current[0].bcoef.height-5);
 
                     // Get QK_B_QKT coefficients
                     double QK_B_QKT_0 = QK_B_QKT_buffer[lind_qkbqkt];
