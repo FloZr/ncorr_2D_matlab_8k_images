@@ -5,6 +5,8 @@
 #include <math.h>
 #include <queue>
 #include <vector>
+#include <array>
+#include <memory>
 #include <list>
 #include <exception>              // Allow exceptions because this function can allocate a very large chunk of memory for the interpolation lookup table
 #include <complex>
@@ -75,14 +77,17 @@ void get_seedinfo(std::vector<local_struct_seedinfo> &seedinfo,const mxArray *pr
 // Queue ----------------------------------------------------------------//
 // ----------------------------------------------------------------------//
 
+typedef std::array<double,9> paramvector_array;
+typedef std::array<double,6> defvector_array;
+
 struct comp_queue {
-    bool operator ()(std::vector<double> const& a, std::vector<double> const& b) const {
+    bool operator ()(paramvector_array const& a, paramvector_array const& b) const {
         // Eighth element is the correlation coefficient
         return a[8] > b[8];
     }
 };
 
-typedef std::priority_queue<std::vector<double>, std::vector<std::vector<double> >,  comp_queue> heap;
+typedef std::priority_queue<paramvector_array, std::vector<paramvector_array>, comp_queue> heap;
 
 
 // ----------------------------------------------------//
@@ -129,23 +134,21 @@ private:
 
     // Inverse Compositional Buffers: Must form these explicitly
     // Thread independent: These are thread independent because they are read only
-    std::vector<double> df_dx_buffer;     // This is the reference gradient
-    std::vector<double> df_dy_buffer;     // This is the reference gradient    
-    std::vector<double> QK_B_QKT_buffer;  // Very large 36 x size of reference image
+    std::unique_ptr<double[]> df_dx_buffer;     // This is the reference gradient
+    std::unique_ptr<double[]> df_dy_buffer;     // This is the reference gradient
+    std::unique_ptr<double[]> QK_B_QKT_buffer;  // Very large 36 x size of reference image
     // Thread dependent: Must form buffers explicitly for each thread to make them thread safe, because these are read/write
     std::vector<std::vector<double> > g_buffer; 
     std::vector<std::vector<double> > df_dp_buffer;  // First order "steepest descent images" - these are computed once per iteration   
-    std::vector<std::vector<double> > x_vec_buffer;
-    std::vector<std::vector<double> > y_vec_buffer; 
     std::vector<std::vector<double> > gradient_buffer;
     std::vector<std::vector<double> > hessian_gn_buffer;  
     
     // Methods
     void precompute();
-    void analyzepoint(heap &queue,const int &x,const int &y,const std::vector<double> &paramvector_init,const int &num_region,const int &num_thread);
-    OUT calcpoint(std::vector<double> &paramvector,const int &x,const int &y,const std::vector<double> &paramvector_init,const int &num_region,const int &num_thread);
-    OUT iterativesearch(std::vector<double> &defvector,double &corrcoef,const std::vector<double> &defvector_init,const int &num_thread);
-    OUT newton(std::vector<double> &defvector,double &corrcoef,double &diffnorm,const std::vector<double> &defvector_init,const double &fm,const double &deltaf_inv,const int &num_thread);
+    void analyzepoint(heap &queue,const int &x,const int &y,const paramvector_array &paramvector_init,const int &num_region,const int &num_thread);
+    OUT calcpoint(paramvector_array &paramvector,const int &x,const int &y,const paramvector_array &paramvector_init,const int &num_region,const int &num_thread);
+    OUT iterativesearch(defvector_array &defvector,double &corrcoef,const defvector_array &defvector_init,const int &num_thread);
+    OUT newton(defvector_array &defvector,double &corrcoef,double &diffnorm,const defvector_array &defvector_init,const double &fm,const double &deltaf_inv,const int &num_thread);
 };
 
 class_rgdic::class_rgdic(mxArray *plhs[ ],const mxArray *prhs[ ]) {
@@ -218,23 +221,21 @@ class_rgdic::class_rgdic(mxArray *plhs[ ],const mxArray *prhs[ ]) {
                       (unsigned long long)qkbqkt_elements,
                       ((double)qkbqkt_elements*8.0)/(1024.0*1024.0*1024.0));
 
-            df_dx_buffer.resize(ref_pixels,0.0);
-            df_dy_buffer.resize(ref_pixels,0.0);
-            QK_B_QKT_buffer.resize(qkbqkt_elements,0.0); // Very large
+            // These arrays are completely overwritten by precompute(), so
+            // avoid the very expensive zero-fill performed by vector::resize.
+            df_dx_buffer.reset(new double[ref_pixels]);
+            df_dy_buffer.reset(new double[ref_pixels]);
+            QK_B_QKT_buffer.reset(new double[qkbqkt_elements]); // Very large
             
             // Thread dependent:
             g_buffer.resize(total_threads); 
             df_dp_buffer.resize(total_threads); 
-            x_vec_buffer.resize(total_threads); 
-            y_vec_buffer.resize(total_threads); 
-            gradient_buffer.resize(total_threads); 
+            gradient_buffer.resize(total_threads);
             hessian_gn_buffer.resize(total_threads); 
             for (int i=0; i<total_threads; i++) {
                 g_buffer[i].resize((radius*2+1)*(radius*2+1),0.0); 
                 df_dp_buffer[i].resize((radius*2+1)*(radius*2+1)*6,0.0); 
-                x_vec_buffer[i].resize(6,0.0); 
-                y_vec_buffer[i].resize(6,0.0); 
-                gradient_buffer[i].resize(6,0.0); 
+                gradient_buffer[i].resize(6,0.0);
                 hessian_gn_buffer[i].resize(36,0.0); 
             }
         } catch (const std::exception& e) {
@@ -362,7 +363,7 @@ void class_rgdic::analysis() {
             heap queue;
             
             // Add seed to queue
-            std::vector<double> paramvector_seed(9,0); // [x y u v du/dx du/dy dv/dx dv/dy corrcoef]
+            paramvector_array paramvector_seed = {}; // [x y u v du/dx du/dy dv/dx dv/dy corrcoef]
             paramvector_seed[0] = seedinfo[lind_seed].paramvector.value[0];
             paramvector_seed[1] = seedinfo[lind_seed].paramvector.value[1];
             paramvector_seed[2] = seedinfo[lind_seed].paramvector.value[2];
@@ -388,7 +389,7 @@ void class_rgdic::analysis() {
                 // 4) Analyze four surrounding points and sort 
                                 
                 // Step 1: load
-                std::vector<double> paramvector_init = queue.top();
+                paramvector_array paramvector_init = queue.top();
 
                 // Step 2: delete 
                 queue.pop();
@@ -438,6 +439,9 @@ void class_rgdic::analysis() {
 
 void class_rgdic::precompute() {
     // Pre compute interpolation coefficients ---------------------------//
+    #ifdef NCORR_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
     for (int i=0; i<current[0].bcoef.width-5; i++) {
         for (int j=0; j<current[0].bcoef.height-5; j++) {                
             // Get bspline coefficients
@@ -521,8 +525,11 @@ void class_rgdic::precompute() {
             QK_B_QKT_buffer[lind_qkbqkt+35] = 0.00006944444444444444*b0-0.0003472222222222222*b1-0.001736111111111111*b10+0.0003472222222222222*b11+0.0006944444444444444*b12-0.003472222222222222*b13+0.006944444444444444*b14-0.006944444444444444*b15+0.003472222222222222*b16-0.0006944444444444444*b17-0.0006944444444444444*b18+0.003472222222222222*b19+0.0006944444444444444*b2-0.006944444444444444*b20+0.006944444444444444*b21-0.003472222222222222*b22+0.0006944444444444444*b23+0.0003472222222222222*b24-0.001736111111111111*b25+0.003472222222222222*b26-0.003472222222222222*b27+0.001736111111111111*b28-0.0003472222222222222*b29-0.0006944444444444444*b3-0.00006944444444444444*b30+0.0003472222222222222*b31-0.0006944444444444444*b32+0.0006944444444444444*b33-0.0003472222222222222*b34+0.00006944444444444444*b35+0.0003472222222222222*b4-0.00006944444444444444*b5-0.0003472222222222222*b6+0.001736111111111111*b7-0.003472222222222222*b8+0.003472222222222222*b9;
         }
     }
-    
+
     // Pre compute reference image gradient -----------------------------//
+    #ifdef NCORR_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
     for (int i=reference[0].border_bcoef-2; i<reference[0].border_bcoef+reference[0].gs.width-2; i++) {
         for (int j=reference[0].border_bcoef-2; j<reference[0].border_bcoef+reference[0].gs.height-2; j++) {                
             // Get bspline coefficients
@@ -574,7 +581,7 @@ void class_rgdic::precompute() {
     }
 }
 
-void class_rgdic::analyzepoint(heap &queue,const int &x,const int &y,const std::vector<double> &paramvector_init,const int &num_region,const int &num_thread) {
+void class_rgdic::analyzepoint(heap &queue,const int &x,const int &y,const paramvector_array &paramvector_init,const int &num_region,const int &num_thread) {
     // These are read only, so they are thread safe
     static double cutoff_corrcoef = 2.0;             // Heuristic, but 2.0 is pretty high. Range is [0,4]. Different images can have different corrcoef cutoffs which work well, so set this to a low value
     static double cutoff_disp = (double)spacing+1;   // Heuristic, this prevents large displacement jumps (most likely incorrect data) form being added
@@ -592,7 +599,7 @@ void class_rgdic::analyzepoint(heap &queue,const int &x,const int &y,const std::
         roi[0].withinregion(x,y,num_region) && // MUST TEST IF IN THE CORRECT REGION - its possible for two adjacent regions to have the same thread number
         threaddiagram.value[y_reduced+x_reduced*threaddiagram.height] == num_thread) {   
         // Initialize paramvector
-        std::vector<double> paramvector(9,0); // [x y u v du/dx du/dy dv/dx dv/dy corrcoef]
+        paramvector_array paramvector = {}; // [x y u v du/dx du/dy dv/dx dv/dy corrcoef]
         
         // Calculate paramvector for a point
         OUT outstate_calcpoint = calcpoint(paramvector,x,y,paramvector_init,num_region,num_thread);
@@ -619,13 +626,13 @@ void class_rgdic::analyzepoint(heap &queue,const int &x,const int &y,const std::
     }
 }
 
-OUT class_rgdic::calcpoint(std::vector<double> &paramvector,const int &x,const int &y,const std::vector<double> &paramvector_init,const int &num_region,const int &num_thread) {
+OUT class_rgdic::calcpoint(paramvector_array &paramvector,const int &x,const int &y,const paramvector_array &paramvector_init,const int &num_region,const int &num_thread) {
     // Get cirroi -> Find initial guess -> Refine results with IC-GN -> Return true or false and store output
     // Step 1: Get cirroi
     roi[0].get_cirroi(x,y,num_region,subsettrunc,num_thread);        
         
     // Step 2: Get initial guess - Use displacement and displacement gradients to get initial guess
-    std::vector<double> defvector_init(6,0); // [u v du/dx du/dy dv/dx dv/dy]
+    defvector_array defvector_init = {}; // [u v du/dx du/dy dv/dx dv/dy]
     // u_init = u+du/dx*x_delta+du/dy*y_delta;
     // v_init = v+dv/dx*x_delta+dv/dy*y_delta;
     defvector_init[0] = paramvector_init[2]+paramvector_init[4]*(x-paramvector_init[0])+paramvector_init[5]*(y-paramvector_init[1]); 
@@ -636,7 +643,7 @@ OUT class_rgdic::calcpoint(std::vector<double> &paramvector,const int &x,const i
     defvector_init[5] = paramvector_init[7];
             
     // Step 3: Get refined results with IC-GN    
-    std::vector<double> defvector(6,0); // [u v du/dx du/dy dv/dx dv/dy]
+    defvector_array defvector = {}; // [u v du/dx du/dy dv/dx dv/dy]
     double corrcoef;
     OUT outstate_iterative = iterativesearch(defvector,corrcoef,defvector_init,num_thread);            
     
@@ -656,7 +663,7 @@ OUT class_rgdic::calcpoint(std::vector<double> &paramvector,const int &x,const i
     return FAILED;        
 }
 
-OUT class_rgdic::iterativesearch(std::vector<double> &defvector,double &corrcoef,const std::vector<double> &defvector_init,const int &num_thread) {   
+OUT class_rgdic::iterativesearch(defvector_array &defvector,double &corrcoef,const defvector_array &defvector_init,const int &num_thread) {
     // Calculate fm
     double fm = 0.0;
     for (int i=0; i<roi[0].cirroi[num_thread].region.noderange.height; i++) {
@@ -675,7 +682,8 @@ OUT class_rgdic::iterativesearch(std::vector<double> &defvector,double &corrcoef
         for (int j=0; j<roi[0].cirroi[num_thread].region.noderange.value[i]; j+=2) {
             for (int k=roi[0].cirroi[num_thread].region.nodelist.value[i+j*roi[0].cirroi[num_thread].region.nodelist.height]; k<=roi[0].cirroi[num_thread].region.nodelist.value[i+(j+1)*roi[0].cirroi[num_thread].region.nodelist.height]; k++) {
                 int lind_ref = k+(i+(roi[0].cirroi[num_thread].x-roi[0].cirroi[num_thread].radius))*reference[0].gs.height;
-                deltaf_inv += pow(reference[0].gs.value[lind_ref]-fm,2);
+                const double reference_delta = reference[0].gs.value[lind_ref]-fm;
+                deltaf_inv += reference_delta*reference_delta;
             }
         }
     }
@@ -753,9 +761,10 @@ OUT class_rgdic::iterativesearch(std::vector<double> &defvector,double &corrcoef
         }
                         
         // Multiply components of hessian by 2/deltaf^2
+        const double hessian_scale = 2.0*deltaf_inv*deltaf_inv;
         for (int i=0; i<6; i++) {
             for (int j=i; j<6; j++) {
-                hessian_gn_buffer[num_thread][j+i*6] *= 2*pow(deltaf_inv,2);
+                hessian_gn_buffer[num_thread][j+i*6] *= hessian_scale;
             }
         }
 
@@ -809,7 +818,7 @@ OUT class_rgdic::iterativesearch(std::vector<double> &defvector,double &corrcoef
     return FAILED;
 }
 
-OUT class_rgdic::newton(std::vector<double> &defvector,double &corrcoef,double &diffnorm,const std::vector<double> &defvector_init,const double &fm,const double &deltaf_inv,const int &num_thread) {
+OUT class_rgdic::newton(defvector_array &defvector,double &corrcoef,double &diffnorm,const defvector_array &defvector_init,const double &fm,const double &deltaf_inv,const int &num_thread) {
     // Will only overwrite queue_new if parameters are valid
     // Interpolate g subset - do this here instead of interp_qbs because QK_B_QKT has been precomputed
     double gm = 0.0;
@@ -841,69 +850,25 @@ OUT class_rgdic::newton(std::vector<double> &defvector,double &corrcoef,double &
                     double x_tilda_delta = x_tilda-(double)x_tilda_floor;
                     double y_tilda_delta = y_tilda-(double)y_tilda_floor;
 
-                    // Form x_vec
-                    x_vec_buffer[num_thread][1] = x_tilda_delta;
-                    x_vec_buffer[num_thread][2] = x_tilda_delta*x_tilda_delta;
-                    x_vec_buffer[num_thread][3] = x_tilda_delta*x_tilda_delta*x_tilda_delta;
-                    x_vec_buffer[num_thread][4] = x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta;
-                    x_vec_buffer[num_thread][5] = x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta;
-
-                    // Form y_vec
-                    y_vec_buffer[num_thread][1] = y_tilda_delta;
-                    y_vec_buffer[num_thread][2] = y_tilda_delta*y_tilda_delta;
-                    y_vec_buffer[num_thread][3] = y_tilda_delta*y_tilda_delta*y_tilda_delta;
-                    y_vec_buffer[num_thread][4] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
-                    y_vec_buffer[num_thread][5] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
+                    // Keep interpolation coordinates local to avoid thread-buffer
+                    // traffic in the innermost interpolation loop.
+                    const double x1 = x_tilda_delta;
+                    const double y1 = y_tilda_delta;
                                     
                     // Calculate lind_qkbqkt for QK_B_QKT
                     std::size_t lind_qkbqkt = (std::size_t)top*(std::size_t)36+
                                               (std::size_t)left*(std::size_t)36*(std::size_t)(current[0].bcoef.height-5);
 
-                    // Get QK_B_QKT coefficients
-                    double QK_B_QKT_0 = QK_B_QKT_buffer[lind_qkbqkt];
-                    double QK_B_QKT_1 = QK_B_QKT_buffer[lind_qkbqkt+1];
-                    double QK_B_QKT_2 = QK_B_QKT_buffer[lind_qkbqkt+2];
-                    double QK_B_QKT_3 = QK_B_QKT_buffer[lind_qkbqkt+3];
-                    double QK_B_QKT_4 = QK_B_QKT_buffer[lind_qkbqkt+4];
-                    double QK_B_QKT_5 = QK_B_QKT_buffer[lind_qkbqkt+5];
-                    double QK_B_QKT_6 = QK_B_QKT_buffer[lind_qkbqkt+6];
-                    double QK_B_QKT_7 = QK_B_QKT_buffer[lind_qkbqkt+7];
-                    double QK_B_QKT_8 = QK_B_QKT_buffer[lind_qkbqkt+8];
-                    double QK_B_QKT_9 = QK_B_QKT_buffer[lind_qkbqkt+9];
-                    double QK_B_QKT_10 = QK_B_QKT_buffer[lind_qkbqkt+10];
-                    double QK_B_QKT_11 = QK_B_QKT_buffer[lind_qkbqkt+11];
-                    double QK_B_QKT_12 = QK_B_QKT_buffer[lind_qkbqkt+12];
-                    double QK_B_QKT_13 = QK_B_QKT_buffer[lind_qkbqkt+13];
-                    double QK_B_QKT_14 = QK_B_QKT_buffer[lind_qkbqkt+14];
-                    double QK_B_QKT_15 = QK_B_QKT_buffer[lind_qkbqkt+15];
-                    double QK_B_QKT_16 = QK_B_QKT_buffer[lind_qkbqkt+16];
-                    double QK_B_QKT_17 = QK_B_QKT_buffer[lind_qkbqkt+17];
-                    double QK_B_QKT_18 = QK_B_QKT_buffer[lind_qkbqkt+18];
-                    double QK_B_QKT_19 = QK_B_QKT_buffer[lind_qkbqkt+19];
-                    double QK_B_QKT_20 = QK_B_QKT_buffer[lind_qkbqkt+20];
-                    double QK_B_QKT_21 = QK_B_QKT_buffer[lind_qkbqkt+21];
-                    double QK_B_QKT_22 = QK_B_QKT_buffer[lind_qkbqkt+22];
-                    double QK_B_QKT_23 = QK_B_QKT_buffer[lind_qkbqkt+23];
-                    double QK_B_QKT_24 = QK_B_QKT_buffer[lind_qkbqkt+24];
-                    double QK_B_QKT_25 = QK_B_QKT_buffer[lind_qkbqkt+25];
-                    double QK_B_QKT_26 = QK_B_QKT_buffer[lind_qkbqkt+26];
-                    double QK_B_QKT_27 = QK_B_QKT_buffer[lind_qkbqkt+27];
-                    double QK_B_QKT_28 = QK_B_QKT_buffer[lind_qkbqkt+28];
-                    double QK_B_QKT_29 = QK_B_QKT_buffer[lind_qkbqkt+29];
-                    double QK_B_QKT_30 = QK_B_QKT_buffer[lind_qkbqkt+30];
-                    double QK_B_QKT_31 = QK_B_QKT_buffer[lind_qkbqkt+31];
-                    double QK_B_QKT_32 = QK_B_QKT_buffer[lind_qkbqkt+32];
-                    double QK_B_QKT_33 = QK_B_QKT_buffer[lind_qkbqkt+33];
-                    double QK_B_QKT_34 = QK_B_QKT_buffer[lind_qkbqkt+34];
-                    double QK_B_QKT_35 = QK_B_QKT_buffer[lind_qkbqkt+35];
-
-                    // Calculate g - main computational bottleneck of the inverse compositional method with biquintic b-splines
-                    g_buffer[num_thread][lind_g] = (QK_B_QKT_0+x_vec_buffer[num_thread][1]*QK_B_QKT_6+x_vec_buffer[num_thread][2]*QK_B_QKT_12+x_vec_buffer[num_thread][3]*QK_B_QKT_18+x_vec_buffer[num_thread][4]*QK_B_QKT_24+x_vec_buffer[num_thread][5]*QK_B_QKT_30)+
-                                                   (QK_B_QKT_1+x_vec_buffer[num_thread][1]*QK_B_QKT_7+x_vec_buffer[num_thread][2]*QK_B_QKT_13+x_vec_buffer[num_thread][3]*QK_B_QKT_19+x_vec_buffer[num_thread][4]*QK_B_QKT_25+x_vec_buffer[num_thread][5]*QK_B_QKT_31)*y_vec_buffer[num_thread][1]+
-                                                   (QK_B_QKT_2+x_vec_buffer[num_thread][1]*QK_B_QKT_8+x_vec_buffer[num_thread][2]*QK_B_QKT_14+x_vec_buffer[num_thread][3]*QK_B_QKT_20+x_vec_buffer[num_thread][4]*QK_B_QKT_26+x_vec_buffer[num_thread][5]*QK_B_QKT_32)*y_vec_buffer[num_thread][2]+
-                                                   (QK_B_QKT_3+x_vec_buffer[num_thread][1]*QK_B_QKT_9+x_vec_buffer[num_thread][2]*QK_B_QKT_15+x_vec_buffer[num_thread][3]*QK_B_QKT_21+x_vec_buffer[num_thread][4]*QK_B_QKT_27+x_vec_buffer[num_thread][5]*QK_B_QKT_33)*y_vec_buffer[num_thread][3]+
-                                                   (QK_B_QKT_4+x_vec_buffer[num_thread][1]*QK_B_QKT_10+x_vec_buffer[num_thread][2]*QK_B_QKT_16+x_vec_buffer[num_thread][3]*QK_B_QKT_22+x_vec_buffer[num_thread][4]*QK_B_QKT_28+x_vec_buffer[num_thread][5]*QK_B_QKT_34)*y_vec_buffer[num_thread][4]+
-                                                   (QK_B_QKT_5+x_vec_buffer[num_thread][1]*QK_B_QKT_11+x_vec_buffer[num_thread][2]*QK_B_QKT_17+x_vec_buffer[num_thread][3]*QK_B_QKT_23+x_vec_buffer[num_thread][4]*QK_B_QKT_29+x_vec_buffer[num_thread][5]*QK_B_QKT_35)*y_vec_buffer[num_thread][5];
+                    // Evaluate the biquintic polynomial in Horner form. The
+                    // coefficient table and all arithmetic remain double precision.
+                    const double *q = QK_B_QKT_buffer.get()+lind_qkbqkt;
+                    const double p0 = (((((q[30]*x1+q[24])*x1+q[18])*x1+q[12])*x1+q[6])*x1+q[0]);
+                    const double p1 = (((((q[31]*x1+q[25])*x1+q[19])*x1+q[13])*x1+q[7])*x1+q[1]);
+                    const double p2 = (((((q[32]*x1+q[26])*x1+q[20])*x1+q[14])*x1+q[8])*x1+q[2]);
+                    const double p3 = (((((q[33]*x1+q[27])*x1+q[21])*x1+q[15])*x1+q[9])*x1+q[3]);
+                    const double p4 = (((((q[34]*x1+q[28])*x1+q[22])*x1+q[16])*x1+q[10])*x1+q[4]);
+                    const double p5 = (((((q[35]*x1+q[29])*x1+q[23])*x1+q[17])*x1+q[11])*x1+q[5]);
+                    g_buffer[num_thread][lind_g] = (((((p5*y1+p4)*y1+p3)*y1+p2)*y1+p1)*y1+p0);
                     
                     // Add components to calculate the mean
                     gm += g_buffer[num_thread][lind_g];
@@ -928,7 +893,8 @@ OUT class_rgdic::newton(std::vector<double> &defvector,double &corrcoef,double &
         for (int j=0; j<roi[0].cirroi[num_thread].region.noderange.value[i]; j+=2) {
             for (int k=roi[0].cirroi[num_thread].region.nodelist.value[i+j*roi[0].cirroi[num_thread].region.nodelist.height]; k<=roi[0].cirroi[num_thread].region.nodelist.value[i+(j+1)*roi[0].cirroi[num_thread].region.nodelist.height]; k++) {
                 int lind_g = (k-roi[0].cirroi[num_thread].y)+roi[0].cirroi[num_thread].radius+i*roi[0].cirroi[num_thread].region.nodelist.height;
-                deltag_inv = deltag_inv+pow(g_buffer[num_thread][lind_g]-gm,2);
+                const double current_delta = g_buffer[num_thread][lind_g]-gm;
+                deltag_inv += current_delta*current_delta;
             }
         }
     }    
@@ -963,7 +929,7 @@ OUT class_rgdic::newton(std::vector<double> &defvector,double &corrcoef,double &
                     gradient_buffer[num_thread][5] += normalized_diff*df_dp_buffer[num_thread][lind_df+5]; 
                     
                     // Correlation coefficient
-                    corrcoef += pow(normalized_diff,2);
+                    corrcoef += normalized_diff*normalized_diff;
                 }
             }    
         }
