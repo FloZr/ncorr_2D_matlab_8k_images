@@ -93,8 +93,7 @@ classdef ncorr < handle
 %
 %   These functions contain source-code for algorithms used with the ncorr
 %   object callbacks and ncorr_gui* functions. Most of these algorithms are
-%   mex files written in C++ and must be compiled with "compile_func_cpp_mex()" 
-%   or mex before using ncorr.
+%   mex files written in C++ and built by ncorr_build_mex before using ncorr.
 %
 %-------------------------------------------------------------------------%
 %-------------------------------------------------------------------------%
@@ -173,17 +172,6 @@ classdef ncorr < handle
                 end
             end
                         
-            % Initialize opengl ------------------------------------------%
-            % In earlier versions of Matlab this will fix inverted plots
-            % Plotting tools are also run based on opengl
-            if (ispc)
-                data_opengl = opengl('data');
-                if (~data_opengl.Software)
-                    % Set opengl to software
-                    opengl('software'); 
-                end
-            end                
-            
             % Start timer to fetch name of the handle that points to ncorr.
             % Use a timer because, to my knowledge, there isn't a callback
             % option if the handle pointing to ncorr gets cleared.
@@ -830,43 +818,23 @@ classdef ncorr < handle
         
         function callback_topmenu_reinstall(obj,hObject,eventdata) %#ok<INUSD>
         % This is the callback for reinstalling the mex files.
-            % Check if ncorr.m is in current directory            
-            listing = dir;            
-            if (any(strcmp('ncorr.m',{listing.name})))        
-                % Ask user if its okay to reinstall
-                contbutton = questdlg('Are you sure you want to reinstall? All data will be lost if proceeding.','Continue Operation','Yes','No','Yes');  
-                if (strcmp(contbutton,'Yes'))
-                    % Clear ncorr_installinfo.txt file - this is the standard
-                    % way to reinstall
-                    filename = 'ncorr_installinfo.txt';
-                    fid = fopen(filename,'w'); % This will clear file  
-                    if (fid ~= -1)    
-                        fclose(fid); % Close file
-
-                        % Force close 
-                        obj.callback_close_function([],[],true);  
-
-                        % Reopen ncorr - this will cause reinstallation since
-                        % ncorr_installinfo.txt has been cleared
-                        handles_ncorr = ncorr;
-
-                        % Get name
-                        name = util_get_name(obj);
-                        if (~isempty(name))
-                            % If there is a name then assign the name to the
-                            % ncorr object.
-                            assignin('base',name,handles_ncorr);
-                        end
-                    else
-                        % Error
-                        h_error = errordlg('For some reason ncorr was not able to clear "ncorr_installinfo.txt" file, reinstall cannot take place.','Error','modal');                    
-                        uiwait(h_error);
-                    end   
+            root = fileparts(mfilename('fullpath'));
+            contbutton = questdlg('Are you sure you want to reinstall? All data will be lost if proceeding.','Continue Operation','Yes','No','Yes');
+            if strcmp(contbutton,'Yes')
+                filename = fullfile(root,'ncorr_installinfo.txt');
+                fid = fopen(filename,'w');
+                if fid ~= -1
+                    fclose(fid);
+                    name = util_get_name(obj);
+                    obj.callback_close_function([],[],true);
+                    handles_ncorr = ncorr;
+                    if ~isempty(name)
+                        assignin('base',name,handles_ncorr);
+                    end
+                else
+                    h_error = errordlg(['Unable to clear ' filename '.'],'Error','modal');
+                    uiwait(h_error);
                 end
-            else
-                % Error
-                h_error = errordlg('Please navigate to folder containing ncorr.m first before reinstalling.','Error','modal');                    
-                uiwait(h_error);
             end
         end
 
@@ -2515,261 +2483,73 @@ classdef ncorr < handle
         end
  
         function outstate = check_mexinstall(obj)
-        % Check to see if mex files exist and loads ncorr_installinfo ----%
-            % Initialize output
             outstate = out.cancelled;
-            
-            % Files to compile:
-            % These are stand alone .cpp files compiled with '-c' flag:
-            lib_ncorr_cpp = {'standard_datatypes','ncorr_datatypes','ncorr_lib'};
-            % These are .cpp mex functions compiled with libraries
-            func_ncorr_cpp = {'ncorr_alg_formmask', ...
-                              'ncorr_alg_formregions', ...
-                              'ncorr_alg_formboundary', ...
-                              'ncorr_alg_formthreaddiagram', ...                              
-                              'ncorr_alg_formunion', ...
-                              'ncorr_alg_extrapdata', ...
-                              'ncorr_alg_adddisp', ...
-                              'ncorr_alg_convert', ...
-                              'ncorr_alg_dispgrad'};
-            % These are .cpp mex functions compiled with libraries and possibly openmp:
-            func_ncorr_openmp_cpp = {'ncorr_alg_testopenmp','ncorr_alg_calcseeds','ncorr_alg_rgdic'};
-
-            % Get object extension:                
-            if (ispc) % pc
-                objext = 'obj';
-            elseif (isunix) % unix
-                objext = 'o';
-            end
-
-            % See if these files have already been compiled:
-            compile = false;
-            
-            % Check libraries first
-            for i = 0:length(lib_ncorr_cpp)-1
-                if (~exist([lib_ncorr_cpp{i+1} '.' objext],'file'))
-                    compile = true;   
-                    break;
-                end
-            end
-            % Check ncorr functions next
-            for i = 0:length(func_ncorr_cpp)-1
-                if (~exist([func_ncorr_cpp{i+1} '.' mexext],'file'))
-                    compile = true;    
-                    break;                     
-                end
-            end                     
-            % Check ncorr functions with openmp
-            for i = 0:length(func_ncorr_openmp_cpp)-1
-                if (~exist([func_ncorr_openmp_cpp{i+1} '.' mexext],'file'))
-                    compile = true;  
-                    break;                       
-                end
-            end
-            
-            if (compile)                
-                % One of the compiled files is missing - tell user that ncorr
-                % will recompile files.
-                e = msgbox('One of the compiled files is missing. If using automatic installation, then mex files will compile; if using manual installation, please close Ncorr and make sure all the files compiled properly.','WindowStyle','modal'); 
-                uiwait(e);
-            end
-
-            if (~compile)
-                % Functions have already been compiled - check
-                % "ncorr_installinfo.txt" file to verify openmp support. 
-                % If "ncorr_installinfo.txt" has incorrect formatting, then 
-                % files will be recompiled. If "ncorr_installinfo.txt" is 
-                % empty, ncorr will take this as the standard way to 
-                % reinstall mex files.
-                try
-                    % ncorr_installinfo should have the format of: 
-                    % [support_openmp_prelim total_cores]
-                    ncorr_installinfo = dlmread('ncorr_installinfo.txt');
-                    if (size(ncorr_installinfo,1) == 1 && size(ncorr_installinfo,2) == 2)
-                        % ncorr_installinfo.txt has the correct number of
-                        % elements
-                        if ((ncorr_installinfo(1) == 0 || ncorr_installinfo(1) == 1) && ...
-                            ncorr_installinfo(2) >= 1)
-                            % Assuming contents have not been modified
-                            % by user, set them:
-                            obj.support_openmp = logical(ncorr_installinfo(1));
-                            obj.total_cores = ncorr_installinfo(2);
-                        else
-                            % ncorr_installinfo.txt has incorrect values
-                            h_error = errordlg('For some reason "ncorr_installinfo.txt" has incorrect values. Program will recompile if using automatic installing. If manually installing Ncorr, please close it and make sure the "ncorr_installinfo.txt" was created correctly.','Error','modal');
-                            uiwait(h_error);
-                            
-                            % recompile files
-                            compile = true;
-                        end
-                    elseif (isempty(ncorr_installinfo))
-                        % ncorr_installinfo is empty, this is the stanard
-                        % way to reinstall Ncorr.
-                        h_error = msgbox('"ncorr_installinfo.txt" file is empty. Program will recompile if using automatic installing. If manually installing Ncorr, please close it and make sure the "ncorr_installinfo.txt" was created correctly.','WindowStyle','modal'); 
-                        uiwait(h_error);
-                        
-                        % recompile files
-                        compile = true;
-                    else
-                        % ncorr_installinfo.txt has extra values which
-                        % aren't supposed to be there
-                        h_error = errordlg('For some reason the "ncorr_installinfo.txt" file has extra or missing values. Program will recompile if using automatic installing. If manually installing Ncorr, please close it and make sure the "ncorr_installinfo.txt" was created correctly.','Error','modal');
-                        uiwait(h_error);
-                        
-                        % recompile files
-                        compile = true;
+            root = fileparts(mfilename('fullpath'));
+            libs = {'standard_datatypes','ncorr_datatypes','ncorr_lib'};
+            funcs = {'ncorr_alg_formmask','ncorr_alg_formregions','ncorr_alg_formboundary', ...
+                'ncorr_alg_formthreaddiagram','ncorr_alg_formunion','ncorr_alg_extrapdata', ...
+                'ncorr_alg_adddisp','ncorr_alg_convert','ncorr_alg_dispgrad', ...
+                'ncorr_alg_testopenmp','ncorr_alg_calcseeds','ncorr_alg_rgdic'};
+            if ispc, objext = 'obj'; else, objext = 'o'; end
+            compile = true;
+            try
+                saved = load(fullfile(root,'ncorr_buildinfo.mat'),'build_info');
+                b = saved.build_info;
+                options = dlmread(fullfile(root,'ncorr_installinfo.txt'));
+                compiler = mex.getCompilerConfigurations('C++','Selected');
+                sources = [dir(fullfile(root,'*.cpp')); dir(fullfile(root,'*.h')); ...
+                    dir(fullfile(root,'ncorr.m')); dir(fullfile(root,'ncorr_build_mex.m'))];
+                [~,order] = sort({sources.name});
+                sources = sources(order);
+                flags = {};
+                if contains(compiler.Manufacturer,'GNU','IgnoreCase',true)
+                    flags = {'CXXFLAGS=$CXXFLAGS -std=c++11'};
+                    if b.support_openmp
+                        flags = {'CXXFLAGS=$CXXFLAGS -std=c++11 -fopenmp -DNCORR_OPENMP','CXXLIBS=$CXXLIBS -lgomp'};
                     end
-                catch %#ok<CTCH>
-                    % Returns error if file does not exist or format is
-                    % wrong
-                    h_error = msgbox('For some reason the "ncorr_installinfo.txt" file is missing or has improper format. Program will recompile if using automatic installing. If manually installing Ncorr, please close it and make sure the "ncorr_installinfo.txt" was created correctly.','WindowStyle','modal'); 
-                    uiwait(h_error);
-                    
-                    % recompile files
-                    compile = true;
-                end    
-            end
-            
-            if (~compile)
-                % Check if previous installation was corrupted by OpenMP
-                % support which does not actually exist
-                if (obj.support_openmp)
-                    if (~ncorr_alg_testopenmp())
-                        % recompile files
-                        compile = true;
+                elseif contains(compiler.Manufacturer,'Microsoft','IgnoreCase',true)
+                    if b.support_openmp
+                        flags = {'COMPFLAGS=$COMPFLAGS /openmp /DNCORR_OPENMP'};
                     end
+                elseif b.support_openmp
+                    error('Ncorr:build:unsupportedOpenMP','Unmapped OpenMP compiler.');
                 end
+                expected = struct('matlab_release',version('-release'),'mex_extension',mexext, ...
+                    'compiler_name',compiler.Name,'compiler_version',compiler.Version, ...
+                    'compiler_location',compiler.Location,'api','-R2017b', ...
+                    'support_openmp',logical(options(1)),'total_cores',options(2), ...
+                    'source_files',{{sources.name}},'source_bytes',[sources.bytes], ...
+                    'source_datenums',[sources.datenum],'openmp_flags',{flags});
+                compile = ~(isequal(size(options),[1 2]) && any(options(1) == [0 1]) && ...
+                    isfinite(options(2)) && options(2) >= 1 && options(2) == fix(options(2)) && ...
+                    isequaln(b,expected));
+                for k = 1:numel(libs)
+                    compile = compile || ~isfile(fullfile(root,[libs{k} '.' objext]));
+                end
+                for k = 1:numel(funcs)
+                    compile = compile || ~isfile(fullfile(root,[funcs{k} '.' mexext]));
+                end
+                if ~compile && b.support_openmp
+                    compile = ~ncorr_alg_testopenmp();
+                end
+            catch
+                % Missing/corrupt metadata or changed compiler requires installation.
+                compile = true;
             end
-            
-            %-------------------------------------------------------------%
-            % BEGIN COMPILE SECTION                                       %
-            %-------------------------------------------------------------%
-            % COMMENT THIS SECTION OUT AND MANUALLY COMPILE IF AUTOMATIC  % 
-            % COMPILATION FAILS!!!                                        %
-            % ------------------------------------------------------------%
-            
-            try       
-                if (compile)
-                    % Check if ncorr.m is in current directory  
-                    listing = dir;            
-                    if (any(strcmp('ncorr.m',{listing.name})))   
-                        % Ask user about openmp support
-                        [support_openmp_prelim,total_cores_prelim,outstate_install] = gui_install(get(obj.handles_gui.figure,'OuterPosition'));
-                        
-                        % See if openmp GUI was cancelled                        
-                        if (outstate_install ~= out.success) 
-                            return;
-                        end
-                        
-                        % Get compiler flags for openmp support. Depends
-                        % on both OS and compiler.
-                        flags_f = {};  
-                        if (support_openmp_prelim)
-                            % Get compiler information
-                            info_comp = mex.getCompilerConfigurations('cpp');
-                            
-                            if ((isfield(struct(info_comp),'Details') && isfield(struct(info_comp.Details),'CompilerExecutable')))
-                                % Get compiler
-                                compiler = info_comp.Details.CompilerExecutable;
-                                
-                                if (~isempty(strfind(compiler,'cl'))) %#ok<STREMP>
-                                    % This is Microsoft visual studio
-                                    % Openmp flag is /openmp
-                                    flags_f = horzcat(flags_f{:},{'COMPFLAGS="$COMPFLAGS'},{'/openmp'},{'/DNCORR_OPENMP"'});
-                                elseif (~isempty(strfind(compiler,'g++'))) %#ok<STREMP>
-                                    % This is the GNU compiler; this is 
-                                    % assumed to be Linux.
-                                    % NOTE: GCC must manually link 
-                                    % against -lgomp. -lgomp also has 
-                                    % to be placed as the very last 
-                                    % library or else it will not compile
-                                    % correctly. 
-                                    % Openmp flag is -fopenmp
-                                    flags_f = horzcat(flags_f{:},{'CXXFLAGS="$CXXFLAGS'},{'-fopenmp'},{'-DNCORR_OPENMP"'},{'CXXLIBS="$CXXLIBS'},{'-lgomp"'});
-                                else
-                                    % C++ compiler is set up, but was not
-                                    % recognized as either gcc or cl
-                                    h_error = errordlg('C++ compiler is set up in mex, but was not recognized as G++ or Visual Studio. Either comment out the compile section in ncorr and manually compile the mex functions, or restart ncorr and disable openmp support.','Error','modal');
-                                    uiwait(h_error);
-                                    
-                                    outstate = out.failed;
-                                    return;
-                                end                                
-                            else
-                                % C++ compiler not installed in mex. 
-                                h_error = errordlg('C++ compiler was not found. If a C++ compiler was manually installed that supports openmp, then either comment out the compile section in ncorr and manually compile the functions or restart ncorr and disable openmp.','Error','modal');
-                                uiwait(h_error);
-                                
-                                outstate = out.failed;
-                                return;
-                            end
-                        end
-
-                        % Compile libraries:
-                        compile_lib_cpp_mex(lib_ncorr_cpp);   
-                        % Compile functions:
-                        compile_func_cpp_mex(func_ncorr_cpp,lib_ncorr_cpp,{});   
-                        % Compile function with openmp:
-                        compile_func_cpp_mex(func_ncorr_openmp_cpp,lib_ncorr_cpp,flags_f);  
-
-                        % Write to ncorr_installinfo.txt file, this file will be
-                        % used next time ncorr is started up to avoid
-                        % having to reinput this information.
-                        filename = 'ncorr_installinfo.txt';    
-                        fid = fopen(filename,'w');            
-                        if (fid ~= -1)    
-                            fclose(fid);    
-
-                            % Write info to file:
-                            dlmwrite(filename,[support_openmp_prelim total_cores_prelim]);
-
-                            % Set support variables:
-                            obj.support_openmp = support_openmp_prelim;
-                            obj.total_cores = total_cores_prelim;
-                        else
-                            % Error
-                            h_error = errordlg('For some reason ncorr was not able to create "ncorr_installinfo.txt" file.','Error','modal');
-                            uiwait(h_error);
-                            
-                            outstate = out.failed;
-                            return;
-                        end
-                    else
-                        % Error
-                        h_error = errordlg('Please navigate to folder containing ncorr.m first before reinstalling.','Error','modal');                    
-                        uiwait(h_error);                        
-                        
-                        outstate = out.failed;
-                        return;
-                    end    
-                end    
-            catch %#ok<CTCH>
-                h_error = errordlg('Files did not compile properly. Make sure mex has a c++ compiler set and that the file names have not been altered or moved. If this is the case, then try reopening and installing ncorr without openmp. If problems persist, then try commenting out the compile section in ncorr and manually compiling the functions. Instructions for compilation are available in the manual at ncorr.com','Error','modal');
+            try
+                if compile
+                    [support_openmp_prelim,total_cores_prelim,state] = gui_install(get(obj.handles_gui.figure,'OuterPosition'));
+                    if state ~= out.success, return; end
+                    b = ncorr_build_mex(support_openmp_prelim,total_cores_prelim);
+                end
+                obj.support_openmp = b.support_openmp;
+                obj.total_cores = b.total_cores;
+            catch ME
+                h_error = errordlg(sprintf('%s\n%s',ME.identifier,ME.message),'Error','modal');
                 uiwait(h_error);
-                
                 outstate = out.failed;
                 return;
-            end  
-            
-            %-------------------------------------------------------------%
-            % END OF COMPILE SECTION                                      %
-            %-------------------------------------------------------------%
-            
-            % Check if openmp is actually enabled by calling
-            % ncorr_alg_testopenmp
-            if (obj.support_openmp)
-                if (~ncorr_alg_testopenmp())
-                    % openmp was enabled and files were compiled, but openmp
-                    % isn't actually supported.
-                    h_error = errordlg('Files compiled, but it was determined that OpenMP is not actually supported. Please reinstall Ncorr in single threaded mode or use a compiler which supports OpenMP.','Error','modal');
-                    uiwait(h_error);
-
-                    outstate = out.failed;
-                    return;
-                end
             end
-            
-            % Set output
             outstate = out.success;
         end
         
@@ -3689,92 +3469,3 @@ function [support_openmp,total_cores,outstate] = gui_install(pos_parent)
     waitfor(handles_gui.figure);
 end
 
-function compile_lib_cpp_mex(lib_cpp)
-% This function compiles cpp_function_lib as object files.
-%
-% Inputs -----------------------------------------------------------------%
-%   lib_cpp - cell of strings; names of libraries to be compiled as object
-%   files
-%
-% Returns error if files are not found.
-    
-    % Cycle over libraries and compile
-    for i = 0:length(lib_cpp)-1           
-        % First check if the cpp and header files exist
-        if (exist([lib_cpp{i+1} '.cpp'],'file') && exist([lib_cpp{i+1} '.h'],'file'))
-            disp(['Installing ' lib_cpp{i+1} '... Please wait']);
-
-            % Generate compiler string
-            string_compile = horzcat({'-c'},{[lib_cpp{i+1} '.cpp']});
-
-            % Compile file
-            mex(string_compile{:});
-        else
-            h_error = errordlg(['Files ' lib_cpp{i+1} '.cpp and ' lib_cpp{i+1} '.h were not found. Please find them and place them in the current directory before proceeding.'],'Error','modal');
-            uiwait(h_error);
-            
-            % Spit error to invoke exception
-            error('Compilation failed because file was not found.');
-        end  
-    end
-end
-
-function compile_func_cpp_mex(func_cpp,lib_cpp,flags_f)
-% This function compiles func_cpp and linkes them with the lib_cpp object 
-% files. If flags are provided then they will be appended when compiling.
-%
-% Inputs -----------------------------------------------------------------%
-%   func_cpp - cell of strings; names of .cpp files to be
-%   compiled
-%   lib_cpp - cell of strings; names of object files to be linked
-%   flags_f - cell of strings; formatted compiler flags.
-%
-% Returns error if library object files or source code files are not found.
-
-    % Get the OS to find object extension
-    if (ispc) % pc
-        objext = 'obj';
-    elseif (isunix) % unix
-        objext = 'o';
-    end
-
-    % Check if lib files have been compiled first
-    for i = 0:length(lib_cpp)-1           
-        if (~exist([lib_cpp{i+1} '.' objext],'file'))
-            % Object file doesnt exist, return error
-            h_error = errordlg(['Library ' lib_cpp{i+1} ' has not yet been compiled. Please compile first and make sure the object file is located in the current directory before proceeding.'],'Error','modal');
-            uiwait(h_error);
-            
-            % Spit error to invoke exception
-            error('Library not compiled yet');
-        end
-    end
-
-    % Cycle over mex files and compile
-    for i = 0:length(func_cpp)-1
-        % First check if the cpp file exists
-        if (exist([func_cpp{i+1} '.cpp'],'file'))
-            disp(['Installing ' func_cpp{i+1} '... Please wait']);
-
-            % Generate compiler string
-            string_compile = {[func_cpp{i+1} '.cpp']};   
-
-            % Append libraries
-            for j = 0:length(lib_cpp)-1         
-                string_compile = horzcat(string_compile,{[lib_cpp{j+1} '.' objext]}); %#ok<AGROW>
-            end               
-
-            % Append flags                      
-            string_compile = horzcat(string_compile,flags_f{:}); %#ok<AGROW>
-
-            % Compile
-            mex(string_compile{:});
-        else
-            h_error = errordlg(['File ' filename '.cpp was not found. Please find it and place it in the current directory before proceeding'],'Error','modal');
-            uiwait(h_error);
-            
-            % Spit error to invoke exception
-            error('Compilation failed because file was not found.');
-        end
-    end      
-end

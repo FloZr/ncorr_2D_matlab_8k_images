@@ -584,7 +584,7 @@ void class_rgdic::precompute() {
 void class_rgdic::analyzepoint(heap &queue,const int &x,const int &y,const paramvector_array &paramvector_init,const int &num_region,const int &num_thread) {
     // These are read only, so they are thread safe
     static double cutoff_corrcoef = 2.0;             // Heuristic, but 2.0 is pretty high. Range is [0,4]. Different images can have different corrcoef cutoffs which work well, so set this to a low value
-    static double cutoff_disp = (double)spacing+1;   // Heuristic, this prevents large displacement jumps (most likely incorrect data) form being added
+    const double cutoff_disp = static_cast<double>(spacing) + 1.0;   // Heuristic, this prevents large displacement jumps (most likely incorrect data) form being added
     
     // Reduce coordinates first
     int x_reduced = x/(spacing+1);
@@ -850,25 +850,67 @@ OUT class_rgdic::newton(defvector_array &defvector,double &corrcoef,double &diff
                     double x_tilda_delta = x_tilda-(double)x_tilda_floor;
                     double y_tilda_delta = y_tilda-(double)y_tilda_floor;
 
-                    // Keep interpolation coordinates local to avoid thread-buffer
-                    // traffic in the innermost interpolation loop.
-                    const double x1 = x_tilda_delta;
-                    const double y1 = y_tilda_delta;
+                    // Preserve develop's polynomial operation order: Horner
+                    // reassociation exceeded the real-data equivalence tolerance.
+                    std::array<double,6> x_vec = {};
+                    std::array<double,6> y_vec = {};
+                    x_vec[1] = x_tilda_delta;
+                    x_vec[2] = x_tilda_delta*x_tilda_delta;
+                    x_vec[3] = x_tilda_delta*x_tilda_delta*x_tilda_delta;
+                    x_vec[4] = x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta;
+                    x_vec[5] = x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta;
+                    y_vec[1] = y_tilda_delta;
+                    y_vec[2] = y_tilda_delta*y_tilda_delta;
+                    y_vec[3] = y_tilda_delta*y_tilda_delta*y_tilda_delta;
+                    y_vec[4] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
+                    y_vec[5] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
                                     
                     // Calculate lind_qkbqkt for QK_B_QKT
                     std::size_t lind_qkbqkt = (std::size_t)top*(std::size_t)36+
                                               (std::size_t)left*(std::size_t)36*(std::size_t)(current[0].bcoef.height-5);
 
-                    // Evaluate the biquintic polynomial in Horner form. The
-                    // coefficient table and all arithmetic remain double precision.
-                    const double *q = QK_B_QKT_buffer.get()+lind_qkbqkt;
-                    const double p0 = (((((q[30]*x1+q[24])*x1+q[18])*x1+q[12])*x1+q[6])*x1+q[0]);
-                    const double p1 = (((((q[31]*x1+q[25])*x1+q[19])*x1+q[13])*x1+q[7])*x1+q[1]);
-                    const double p2 = (((((q[32]*x1+q[26])*x1+q[20])*x1+q[14])*x1+q[8])*x1+q[2]);
-                    const double p3 = (((((q[33]*x1+q[27])*x1+q[21])*x1+q[15])*x1+q[9])*x1+q[3]);
-                    const double p4 = (((((q[34]*x1+q[28])*x1+q[22])*x1+q[16])*x1+q[10])*x1+q[4]);
-                    const double p5 = (((((q[35]*x1+q[29])*x1+q[23])*x1+q[17])*x1+q[11])*x1+q[5]);
-                    g_buffer[num_thread][lind_g] = (((((p5*y1+p4)*y1+p3)*y1+p2)*y1+p1)*y1+p0);
+                    double QK_B_QKT_0 = QK_B_QKT_buffer[lind_qkbqkt];
+                    double QK_B_QKT_1 = QK_B_QKT_buffer[lind_qkbqkt+1];
+                    double QK_B_QKT_2 = QK_B_QKT_buffer[lind_qkbqkt+2];
+                    double QK_B_QKT_3 = QK_B_QKT_buffer[lind_qkbqkt+3];
+                    double QK_B_QKT_4 = QK_B_QKT_buffer[lind_qkbqkt+4];
+                    double QK_B_QKT_5 = QK_B_QKT_buffer[lind_qkbqkt+5];
+                    double QK_B_QKT_6 = QK_B_QKT_buffer[lind_qkbqkt+6];
+                    double QK_B_QKT_7 = QK_B_QKT_buffer[lind_qkbqkt+7];
+                    double QK_B_QKT_8 = QK_B_QKT_buffer[lind_qkbqkt+8];
+                    double QK_B_QKT_9 = QK_B_QKT_buffer[lind_qkbqkt+9];
+                    double QK_B_QKT_10 = QK_B_QKT_buffer[lind_qkbqkt+10];
+                    double QK_B_QKT_11 = QK_B_QKT_buffer[lind_qkbqkt+11];
+                    double QK_B_QKT_12 = QK_B_QKT_buffer[lind_qkbqkt+12];
+                    double QK_B_QKT_13 = QK_B_QKT_buffer[lind_qkbqkt+13];
+                    double QK_B_QKT_14 = QK_B_QKT_buffer[lind_qkbqkt+14];
+                    double QK_B_QKT_15 = QK_B_QKT_buffer[lind_qkbqkt+15];
+                    double QK_B_QKT_16 = QK_B_QKT_buffer[lind_qkbqkt+16];
+                    double QK_B_QKT_17 = QK_B_QKT_buffer[lind_qkbqkt+17];
+                    double QK_B_QKT_18 = QK_B_QKT_buffer[lind_qkbqkt+18];
+                    double QK_B_QKT_19 = QK_B_QKT_buffer[lind_qkbqkt+19];
+                    double QK_B_QKT_20 = QK_B_QKT_buffer[lind_qkbqkt+20];
+                    double QK_B_QKT_21 = QK_B_QKT_buffer[lind_qkbqkt+21];
+                    double QK_B_QKT_22 = QK_B_QKT_buffer[lind_qkbqkt+22];
+                    double QK_B_QKT_23 = QK_B_QKT_buffer[lind_qkbqkt+23];
+                    double QK_B_QKT_24 = QK_B_QKT_buffer[lind_qkbqkt+24];
+                    double QK_B_QKT_25 = QK_B_QKT_buffer[lind_qkbqkt+25];
+                    double QK_B_QKT_26 = QK_B_QKT_buffer[lind_qkbqkt+26];
+                    double QK_B_QKT_27 = QK_B_QKT_buffer[lind_qkbqkt+27];
+                    double QK_B_QKT_28 = QK_B_QKT_buffer[lind_qkbqkt+28];
+                    double QK_B_QKT_29 = QK_B_QKT_buffer[lind_qkbqkt+29];
+                    double QK_B_QKT_30 = QK_B_QKT_buffer[lind_qkbqkt+30];
+                    double QK_B_QKT_31 = QK_B_QKT_buffer[lind_qkbqkt+31];
+                    double QK_B_QKT_32 = QK_B_QKT_buffer[lind_qkbqkt+32];
+                    double QK_B_QKT_33 = QK_B_QKT_buffer[lind_qkbqkt+33];
+                    double QK_B_QKT_34 = QK_B_QKT_buffer[lind_qkbqkt+34];
+                    double QK_B_QKT_35 = QK_B_QKT_buffer[lind_qkbqkt+35];
+                    g_buffer[num_thread][lind_g] = (QK_B_QKT_0+x_vec[1]*QK_B_QKT_6+x_vec[2]*QK_B_QKT_12+x_vec[3]*QK_B_QKT_18+x_vec[4]*QK_B_QKT_24+x_vec[5]*QK_B_QKT_30)+
+                                                   (QK_B_QKT_1+x_vec[1]*QK_B_QKT_7+x_vec[2]*QK_B_QKT_13+x_vec[3]*QK_B_QKT_19+x_vec[4]*QK_B_QKT_25+x_vec[5]*QK_B_QKT_31)*y_vec[1]+
+                                                   (QK_B_QKT_2+x_vec[1]*QK_B_QKT_8+x_vec[2]*QK_B_QKT_14+x_vec[3]*QK_B_QKT_20+x_vec[4]*QK_B_QKT_26+x_vec[5]*QK_B_QKT_32)*y_vec[2]+
+                                                   (QK_B_QKT_3+x_vec[1]*QK_B_QKT_9+x_vec[2]*QK_B_QKT_15+x_vec[3]*QK_B_QKT_21+x_vec[4]*QK_B_QKT_27+x_vec[5]*QK_B_QKT_33)*y_vec[3]+
+                                                   (QK_B_QKT_4+x_vec[1]*QK_B_QKT_10+x_vec[2]*QK_B_QKT_16+x_vec[3]*QK_B_QKT_22+x_vec[4]*QK_B_QKT_28+x_vec[5]*QK_B_QKT_34)*y_vec[4]+
+                                                   (QK_B_QKT_5+x_vec[1]*QK_B_QKT_11+x_vec[2]*QK_B_QKT_17+x_vec[3]*QK_B_QKT_23+x_vec[4]*QK_B_QKT_29+x_vec[5]*QK_B_QKT_35)*y_vec[5];
                     
                     // Add components to calculate the mean
                     gm += g_buffer[num_thread][lind_g];
@@ -893,8 +935,8 @@ OUT class_rgdic::newton(defvector_array &defvector,double &corrcoef,double &diff
         for (int j=0; j<roi[0].cirroi[num_thread].region.noderange.value[i]; j+=2) {
             for (int k=roi[0].cirroi[num_thread].region.nodelist.value[i+j*roi[0].cirroi[num_thread].region.nodelist.height]; k<=roi[0].cirroi[num_thread].region.nodelist.value[i+(j+1)*roi[0].cirroi[num_thread].region.nodelist.height]; k++) {
                 int lind_g = (k-roi[0].cirroi[num_thread].y)+roi[0].cirroi[num_thread].radius+i*roi[0].cirroi[num_thread].region.nodelist.height;
-                const double current_delta = g_buffer[num_thread][lind_g]-gm;
-                deltag_inv += current_delta*current_delta;
+                // Preserve normalization rounding: x*x failed real-data equivalence.
+                deltag_inv = deltag_inv+pow(g_buffer[num_thread][lind_g]-gm,2);
             }
         }
     }    

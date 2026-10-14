@@ -55,29 +55,30 @@ function [imgs,outstate] = ncorr_util_loadimgs(lazyparam)
         try
             % Multiple images selected
             % Files must have format of "name_#.ext"                   
-            % Get name and extension from the first image. Use these to
-            % compare to others to ensure consistency. Note that
-            % strfind will return [] if it fails, meaning name and ext
-            % will be empty, so test for this. Also note that if there
-            % are more than one instance found, that strfind will return a
-            % vector of indices, which, when used with ':', will only use
-            % the first index found in the vector. Thus, use fliplr so
-            % that only the number after the last '_' is used.
-            name = filename{1}(1:fliplr(strfind(filename{1},'_'))-1);
-            ext = filename{1}(strfind(filename{1},'.')+1:end);  
+            % Split at each filename's last underscore. R2026a requires
+            % scalar colon operands; strfind can return several positions.
+            [~,stem,ext] = fileparts(filename{1});
+            separator = find(stem == '_',1,'last');
+            name = '';
+            if (~isempty(separator))
+                name = stem(1:separator-1);
+            end
 
             if (~isempty(name) && ~isempty(ext))
                 list_num = zeros(length(filename),1);
                 imgs_prelim = ncorr_class_img.empty;
                 incorrectformat = false;
                 for i = 0:length(filename)-1
-                    name_buffer = filename{i+1}(1:fliplr(strfind(filename{1},'_'))-1);
-                    ext_buffer = filename{i+1}(strfind(filename{i+1},'.')+1:end);
-                    num_buffer = str2double(filename{i+1}(fliplr(strfind(filename{1},'_'))+1:strfind(filename{i+1},'.')-1));
-                    % Note that name and ext have already been tested
-                    % to make sure they aren't empty. If strfind fails
-                    % for name_buffer or ext_buffer, they will be
-                    % empty, and strcmp will return false.
+                    [~,stem_buffer,ext_buffer] = fileparts(filename{i+1});
+                    separator_buffer = find(stem_buffer == '_',1,'last');
+                    name_buffer = '';
+                    num_buffer = NaN;
+                    if (~isempty(separator_buffer))
+                        name_buffer = stem_buffer(1:separator_buffer-1);
+                        num_buffer = str2double(stem_buffer(separator_buffer+1:end));
+                    end
+                    % A missing separator/extension cannot match the first
+                    % filename's nonempty prefix/extension.
                     if (strcmp(name_buffer,name) && ...
                         strcmp(ext_buffer,ext) && ...
                         ncorr_util_isintbb(num_buffer,0,inf,'Image number') == out.success && ...
@@ -117,8 +118,8 @@ function [imgs,outstate] = ncorr_util_loadimgs(lazyparam)
 
                 outstate = out.failed;    
             end
-        catch %#ok<CTCH>
-            h_error = errordlg('Loading images failed, most likely because Ncorr ran out of memory.','Error','modal');  
+        catch ME
+            h_error = errordlg(sprintf('Loading images failed.\n%s: %s',ME.identifier,ME.message),'Error','modal');
             uiwait(h_error);
 
             outstate = out.failed;    
