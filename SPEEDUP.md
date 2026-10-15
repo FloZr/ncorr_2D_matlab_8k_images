@@ -20,6 +20,23 @@ Build with `ncorr_build_mex(true,4)` to enable OpenMP precomputation.
 Avoiding buffer zero-fill reduces memory writes, not the resident double
 coefficient-table size (roughly 18 GiB for an 8192-square image).
 
+## Seed initial-guess search
+
+`matlab_2026a` also removes the general-purpose `pow(x,2)` call from the
+current-intensity variance accumulation in `ncorr_alg_calcseeds`' exhaustive
+NCC search. Explicit double multiplication avoids a Microsoft compiler
+performance penalty without changing the candidate traversal, mask,
+normalization, peak-selection rule or subsequent iterative solver.
+This is separate from RG-DIC's current-intensity variance, whose original
+arithmetic remains unchanged.
+
+Validation includes exact seed-parameter and convergence-struct comparisons
+against unchanged Microsoft and legacy MinGW builds on the same inputs,
+signed synthetic translations across the coarse-to-fine search boundary,
+and the existing mixed-spacing regression. Dataset-specific inputs and
+timings remain local-only.
+
+
 ## Source-only distribution
 
 The public package contains Ncorr sources, generic tests, setup documentation

@@ -564,8 +564,10 @@ OUT class_calcseeds::ncc(std::vector<int> &disp_ncc,const int &reduction_multigr
                     int y_cur_reduced = j+l;
                     if (cirroi_mask_reduced[l+k*height_ref_reduced]) {
                         // Remember ref_reduced already has mean subtracted
-                        numerator += ref_reduced[l+k*height_ref_reduced]*(cur_reduced[y_cur_reduced+x_cur_reduced*height_cur_reduced]-gm);
-                        gsquaredsum += pow(cur_reduced[y_cur_reduced+x_cur_reduced*height_cur_reduced]-gm,2);
+                        const double current_centered = cur_reduced[y_cur_reduced+x_cur_reduced*height_cur_reduced]-gm;
+                        numerator += ref_reduced[l+k*height_ref_reduced]*current_centered;
+                        // MSVC retains a general pow call here; this square runs for every NCC sample.
+                        gsquaredsum += current_centered*current_centered;
                     }
                 }
             }

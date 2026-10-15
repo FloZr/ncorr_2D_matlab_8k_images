@@ -69,6 +69,21 @@ displacement-jump gate now follows the current call's spacing rather than the
 first call since loading the MEX. `test_ncorr_rgdic_spacing` exercises both
 mixed-spacing orders with a known affine stretch, coverage and accuracy checks.
 
+### Seed propagation with Microsoft compilers
+
+The seed initial-guess search explicitly multiplies centered current
+intensities to form their squares. Microsoft Visual C++ otherwise retains
+a general-purpose `pow(x,2)` call in the innermost whole-image NCC loop,
+making seed propagation substantially slower than the same source built
+with MinGW. This change does not reduce the search region, subset size or
+precision, or change refinement, convergence settings or the displacement gate.
+
+After updating this C++ source, close Ncorr and restart MATLAB to unload
+the old MEX binary, then run `ncorr_build_mex(true,4)` from the updated folder
+before reopening Ncorr. Updating the `.cpp` file alone does not update a
+loaded native binary.
+
+
 ### Loading numbered image sequences
 
 Multi-image selections must share a prefix and extension and end in a numeric
