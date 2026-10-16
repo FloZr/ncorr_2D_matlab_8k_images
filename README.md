@@ -69,6 +69,22 @@ displacement-jump gate now follows the current call's spacing rather than the
 first call since loading the MEX. `test_ncorr_rgdic_spacing` exercises both
 mixed-spacing orders with a known affine stretch, coverage and accuracy checks.
 
+### Displacement-field calculation
+
+The RG-DIC Newton loop caches its fixed subset geometry and buffer addresses,
+keeps independent gradient accumulators local, and evaluates independent
+interpolation rows in pairs using SSE2 double operations on supported x86
+targets. Other architectures use scalar fallbacks. Operation order within
+each polynomial and gradient component is preserved; the optimization does
+not change subset size, spacing, convergence settings or field acceptance.
+No AVX2 compiler option or additional dependency is required.
+Variance squares use direct double multiplication rather than a general
+runtime power call. This preserves double precision but can change rounding
+relative to older binaries; do not assume bitwise displacement equivalence.
+
+This C++ update requires rebuilding the MEX files. Restart MATLAB to unload
+older native binaries, then run `ncorr_build_mex(true,4)` in the updated folder.
+
 ### Seed propagation with Microsoft compilers
 
 The seed initial-guess search explicitly multiplies centered current

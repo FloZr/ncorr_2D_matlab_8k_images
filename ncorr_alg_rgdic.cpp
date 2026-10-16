@@ -6,6 +6,7 @@
 #include <queue>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <memory>
 #include <list>
 #include <exception>              // Allow exceptions because this function can allocate a very large chunk of memory for the interpolation lookup table
@@ -18,6 +19,46 @@
 #ifdef NCORR_OPENMP
     #include <omp.h>              // openmp header
 #endif
+
+#if defined(_M_X64) || defined(__SSE2__)
+    #include <emmintrin.h>
+    #define NCORR_SSE2
+#endif
+
+// Evaluate independent polynomial rows together without reassociating either
+// the x polynomial or the final y accumulation. Horner changes their rounding.
+static inline double interpolate_direct(const double *q,const double x,const double y) {
+    const double x2 = x*x;
+    const double x3 = x2*x;
+    const double x4 = x3*x;
+    const double x5 = x4*x;
+    const double y2 = y*y;
+    const double y3 = y2*y;
+    const double y4 = y3*y;
+    const double y5 = y4*y;
+    double p[6];
+    #ifdef NCORR_SSE2
+        const __m128d vx1 = _mm_set1_pd(x);
+        const __m128d vx2 = _mm_set1_pd(x2);
+        const __m128d vx3 = _mm_set1_pd(x3);
+        const __m128d vx4 = _mm_set1_pd(x4);
+        const __m128d vx5 = _mm_set1_pd(x5);
+        for (int row=0; row<6; row+=2) {
+            __m128d value = _mm_loadu_pd(q+row);
+            value = _mm_add_pd(value,_mm_mul_pd(vx1,_mm_loadu_pd(q+row+6)));
+            value = _mm_add_pd(value,_mm_mul_pd(vx2,_mm_loadu_pd(q+row+12)));
+            value = _mm_add_pd(value,_mm_mul_pd(vx3,_mm_loadu_pd(q+row+18)));
+            value = _mm_add_pd(value,_mm_mul_pd(vx4,_mm_loadu_pd(q+row+24)));
+            value = _mm_add_pd(value,_mm_mul_pd(vx5,_mm_loadu_pd(q+row+30)));
+            _mm_storeu_pd(p+row,value);
+        }
+    #else
+        for (int row=0; row<6; row++) {
+            p[row] = q[row]+x*q[row+6]+x2*q[row+12]+x3*q[row+18]+x4*q[row+24]+x5*q[row+30];
+        }
+    #endif
+    return p[0]+p[1]*y+p[2]*y2+p[3]*y3+p[4]*y4+p[5]*y5;
+}
 
 // ----------------------------------------------------------------------//
 // Seed info ------------------------------------------------------------//
@@ -819,106 +860,65 @@ OUT class_rgdic::iterativesearch(defvector_array &defvector,double &corrcoef,con
 }
 
 OUT class_rgdic::newton(defvector_array &defvector,double &corrcoef,double &diffnorm,const defvector_array &defvector_init,const double &fm,const double &deltaf_inv,const int &num_thread) {
+    // Geometry and buffer addresses are fixed throughout this Newton step.
+    const auto &cirroi = roi[0].cirroi[num_thread];
+    const int columns = cirroi.region.noderange.height;
+    const int subset_height = cirroi.region.nodelist.height;
+    const int *ranges = cirroi.region.noderange.value;
+    const int *nodes = cirroi.region.nodelist.value;
+    const int cx = cirroi.x;
+    const int cy = cirroi.y;
+    const int subset_radius = cirroi.radius;
+    const int reference_height = reference[0].gs.height;
+    const double *reference_values = reference[0].gs.value;
+    const double *df = df_dp_buffer[num_thread].data();
+    double *g = g_buffer[num_thread].data();
+    const int border = current[0].border_bcoef;
+    const int coefficient_height = current[0].bcoef.height;
+    const int coefficient_width = current[0].bcoef.width;
+    const std::size_t lookup_stride = (std::size_t)36*(std::size_t)(coefficient_height-5);
+    const double *lookup = QK_B_QKT_buffer.get();
     // Will only overwrite queue_new if parameters are valid
     // Interpolate g subset - do this here instead of interp_qbs because QK_B_QKT has been precomputed
     double gm = 0.0;
-    for (int i=0; i<roi[0].cirroi[num_thread].region.noderange.height; i++) {
-        for (int j=0; j<roi[0].cirroi[num_thread].region.noderange.value[i]; j+=2) {
-            for (int k=roi[0].cirroi[num_thread].region.nodelist.value[i+j*roi[0].cirroi[num_thread].region.nodelist.height]; k<=roi[0].cirroi[num_thread].region.nodelist.value[i+(j+1)*roi[0].cirroi[num_thread].region.nodelist.height]; k++) {
+    for (int i=0; i<columns; i++) {
+        for (int j=0; j<ranges[i]; j+=2) {
+            for (int k=nodes[i+j*subset_height]; k<=nodes[i+(j+1)*subset_height]; k++) {
                 // Find new coordinates
-                double dx = (double)(i-roi[0].cirroi[num_thread].radius);
-                double dy = (double)(k-roi[0].cirroi[num_thread].y);
+                double dx = (double)(i-subset_radius);
+                double dy = (double)(k-cy);
 
                 double y_tilda = (double)k + defvector_init[1] + defvector_init[4]*dx + defvector_init[5]*dy;
-                double x_tilda = (double)(i+(roi[0].cirroi[num_thread].x-roi[0].cirroi[num_thread].radius)) + defvector_init[0] + defvector_init[2]*dx + defvector_init[3]*dy;
+                double x_tilda = (double)(i+(cx-subset_radius)) + defvector_init[0] + defvector_init[2]*dx + defvector_init[3]*dy;
 
                 int x_tilda_floor = (int)floor(x_tilda);
                 int y_tilda_floor = (int)floor(y_tilda);
 
-                int lind_g = (int)dy+roi[0].cirroi[num_thread].radius+i*roi[0].cirroi[num_thread].region.nodelist.height;
+                int lind_g = (int)dy+subset_radius+i*subset_height;
                 
                 // Get bounds of the desired b-spline coefficients used for interpolation
-                int top = y_tilda_floor+current[0].border_bcoef-2;
-                int left = x_tilda_floor+current[0].border_bcoef-2;
-                int bottom = y_tilda_floor+current[0].border_bcoef+3;
-                int right = x_tilda_floor+current[0].border_bcoef+3;
+                int top = y_tilda_floor+border-2;
+                int left = x_tilda_floor+border-2;
+                int bottom = y_tilda_floor+border+3;
+                int right = x_tilda_floor+border+3;
                 
                 if (top >= 0 &&
                     left >= 0 && 
-                    bottom < current[0].bcoef.height &&
-                    right < current[0].bcoef.width) {                    
+                    bottom < coefficient_height &&
+                    right < coefficient_width) {
                     double x_tilda_delta = x_tilda-(double)x_tilda_floor;
                     double y_tilda_delta = y_tilda-(double)y_tilda_floor;
 
-                    // Preserve develop's polynomial operation order: Horner
-                    // reassociation exceeded the real-data equivalence tolerance.
-                    std::array<double,6> x_vec = {};
-                    std::array<double,6> y_vec = {};
-                    x_vec[1] = x_tilda_delta;
-                    x_vec[2] = x_tilda_delta*x_tilda_delta;
-                    x_vec[3] = x_tilda_delta*x_tilda_delta*x_tilda_delta;
-                    x_vec[4] = x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta;
-                    x_vec[5] = x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta*x_tilda_delta;
-                    y_vec[1] = y_tilda_delta;
-                    y_vec[2] = y_tilda_delta*y_tilda_delta;
-                    y_vec[3] = y_tilda_delta*y_tilda_delta*y_tilda_delta;
-                    y_vec[4] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
-                    y_vec[5] = y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta*y_tilda_delta;
-                                    
-                    // Calculate lind_qkbqkt for QK_B_QKT
-                    std::size_t lind_qkbqkt = (std::size_t)top*(std::size_t)36+
-                                              (std::size_t)left*(std::size_t)36*(std::size_t)(current[0].bcoef.height-5);
-
-                    double QK_B_QKT_0 = QK_B_QKT_buffer[lind_qkbqkt];
-                    double QK_B_QKT_1 = QK_B_QKT_buffer[lind_qkbqkt+1];
-                    double QK_B_QKT_2 = QK_B_QKT_buffer[lind_qkbqkt+2];
-                    double QK_B_QKT_3 = QK_B_QKT_buffer[lind_qkbqkt+3];
-                    double QK_B_QKT_4 = QK_B_QKT_buffer[lind_qkbqkt+4];
-                    double QK_B_QKT_5 = QK_B_QKT_buffer[lind_qkbqkt+5];
-                    double QK_B_QKT_6 = QK_B_QKT_buffer[lind_qkbqkt+6];
-                    double QK_B_QKT_7 = QK_B_QKT_buffer[lind_qkbqkt+7];
-                    double QK_B_QKT_8 = QK_B_QKT_buffer[lind_qkbqkt+8];
-                    double QK_B_QKT_9 = QK_B_QKT_buffer[lind_qkbqkt+9];
-                    double QK_B_QKT_10 = QK_B_QKT_buffer[lind_qkbqkt+10];
-                    double QK_B_QKT_11 = QK_B_QKT_buffer[lind_qkbqkt+11];
-                    double QK_B_QKT_12 = QK_B_QKT_buffer[lind_qkbqkt+12];
-                    double QK_B_QKT_13 = QK_B_QKT_buffer[lind_qkbqkt+13];
-                    double QK_B_QKT_14 = QK_B_QKT_buffer[lind_qkbqkt+14];
-                    double QK_B_QKT_15 = QK_B_QKT_buffer[lind_qkbqkt+15];
-                    double QK_B_QKT_16 = QK_B_QKT_buffer[lind_qkbqkt+16];
-                    double QK_B_QKT_17 = QK_B_QKT_buffer[lind_qkbqkt+17];
-                    double QK_B_QKT_18 = QK_B_QKT_buffer[lind_qkbqkt+18];
-                    double QK_B_QKT_19 = QK_B_QKT_buffer[lind_qkbqkt+19];
-                    double QK_B_QKT_20 = QK_B_QKT_buffer[lind_qkbqkt+20];
-                    double QK_B_QKT_21 = QK_B_QKT_buffer[lind_qkbqkt+21];
-                    double QK_B_QKT_22 = QK_B_QKT_buffer[lind_qkbqkt+22];
-                    double QK_B_QKT_23 = QK_B_QKT_buffer[lind_qkbqkt+23];
-                    double QK_B_QKT_24 = QK_B_QKT_buffer[lind_qkbqkt+24];
-                    double QK_B_QKT_25 = QK_B_QKT_buffer[lind_qkbqkt+25];
-                    double QK_B_QKT_26 = QK_B_QKT_buffer[lind_qkbqkt+26];
-                    double QK_B_QKT_27 = QK_B_QKT_buffer[lind_qkbqkt+27];
-                    double QK_B_QKT_28 = QK_B_QKT_buffer[lind_qkbqkt+28];
-                    double QK_B_QKT_29 = QK_B_QKT_buffer[lind_qkbqkt+29];
-                    double QK_B_QKT_30 = QK_B_QKT_buffer[lind_qkbqkt+30];
-                    double QK_B_QKT_31 = QK_B_QKT_buffer[lind_qkbqkt+31];
-                    double QK_B_QKT_32 = QK_B_QKT_buffer[lind_qkbqkt+32];
-                    double QK_B_QKT_33 = QK_B_QKT_buffer[lind_qkbqkt+33];
-                    double QK_B_QKT_34 = QK_B_QKT_buffer[lind_qkbqkt+34];
-                    double QK_B_QKT_35 = QK_B_QKT_buffer[lind_qkbqkt+35];
-                    g_buffer[num_thread][lind_g] = (QK_B_QKT_0+x_vec[1]*QK_B_QKT_6+x_vec[2]*QK_B_QKT_12+x_vec[3]*QK_B_QKT_18+x_vec[4]*QK_B_QKT_24+x_vec[5]*QK_B_QKT_30)+
-                                                   (QK_B_QKT_1+x_vec[1]*QK_B_QKT_7+x_vec[2]*QK_B_QKT_13+x_vec[3]*QK_B_QKT_19+x_vec[4]*QK_B_QKT_25+x_vec[5]*QK_B_QKT_31)*y_vec[1]+
-                                                   (QK_B_QKT_2+x_vec[1]*QK_B_QKT_8+x_vec[2]*QK_B_QKT_14+x_vec[3]*QK_B_QKT_20+x_vec[4]*QK_B_QKT_26+x_vec[5]*QK_B_QKT_32)*y_vec[2]+
-                                                   (QK_B_QKT_3+x_vec[1]*QK_B_QKT_9+x_vec[2]*QK_B_QKT_15+x_vec[3]*QK_B_QKT_21+x_vec[4]*QK_B_QKT_27+x_vec[5]*QK_B_QKT_33)*y_vec[3]+
-                                                   (QK_B_QKT_4+x_vec[1]*QK_B_QKT_10+x_vec[2]*QK_B_QKT_16+x_vec[3]*QK_B_QKT_22+x_vec[4]*QK_B_QKT_28+x_vec[5]*QK_B_QKT_34)*y_vec[4]+
-                                                   (QK_B_QKT_5+x_vec[1]*QK_B_QKT_11+x_vec[2]*QK_B_QKT_17+x_vec[3]*QK_B_QKT_23+x_vec[4]*QK_B_QKT_29+x_vec[5]*QK_B_QKT_35)*y_vec[5];
+                    const std::size_t lind_qkbqkt = (std::size_t)top*(std::size_t)36+(std::size_t)left*lookup_stride;
+                    g[lind_g] = interpolate_direct(lookup+lind_qkbqkt,x_tilda_delta,y_tilda_delta);
                     
                     // Add components to calculate the mean
-                    gm += g_buffer[num_thread][lind_g];
+                    gm += g[lind_g];
                 } else {                    
                     // If this condition is satisfied then we are 
                     // interpolating a point beyond the bounds of the 
                     // original image, so just set the values to zero
-                    g_buffer[num_thread][lind_g] = 0.0;
+                    g[lind_g] = 0.0;
                     
                     // Don't add anything to averages
                     continue;
@@ -927,16 +927,17 @@ OUT class_rgdic::newton(defvector_array &defvector,double &corrcoef,double &diff
         }        
     }
     // Divide by totalpoints to get real average
-    gm /= (double)roi[0].cirroi[num_thread].region.totalpoints;
+    gm /= (double)cirroi.region.totalpoints;
     
     // Calculate deltag_inv
     double deltag_inv = 0.0;
-    for (int i=0; i<roi[0].cirroi[num_thread].region.noderange.height; i++) {
-        for (int j=0; j<roi[0].cirroi[num_thread].region.noderange.value[i]; j+=2) {
-            for (int k=roi[0].cirroi[num_thread].region.nodelist.value[i+j*roi[0].cirroi[num_thread].region.nodelist.height]; k<=roi[0].cirroi[num_thread].region.nodelist.value[i+(j+1)*roi[0].cirroi[num_thread].region.nodelist.height]; k++) {
-                int lind_g = (k-roi[0].cirroi[num_thread].y)+roi[0].cirroi[num_thread].radius+i*roi[0].cirroi[num_thread].region.nodelist.height;
-                // Preserve normalization rounding: x*x failed real-data equivalence.
-                deltag_inv = deltag_inv+pow(g_buffer[num_thread][lind_g]-gm,2);
+    for (int i=0; i<columns; i++) {
+        for (int j=0; j<ranges[i]; j+=2) {
+            for (int k=nodes[i+j*subset_height]; k<=nodes[i+(j+1)*subset_height]; k++) {
+                int lind_g = (k-cy)+subset_radius+i*subset_height;
+                // Keep double precision; avoid a general-purpose power call.
+                const double intensity_difference = g[lind_g]-gm;
+                deltag_inv = deltag_inv+intensity_difference*intensity_difference;
             }
         }
     }    
@@ -948,33 +949,46 @@ OUT class_rgdic::newton(defvector_array &defvector,double &corrcoef,double &diff
         deltag_inv = 1.0/deltag_inv;        
         
         // Calculate gradient
-        // Initialize to zero first
-        std::fill(gradient_buffer[num_thread].begin(),gradient_buffer[num_thread].end(),0.0);
+        // Each component keeps its original pixel accumulation order. Local
+        // accumulators avoid repeated aliased vector loads/stores per pixel.
+        #ifdef NCORR_SSE2
+            __m128d gradient01 = _mm_setzero_pd();
+            __m128d gradient23 = _mm_setzero_pd();
+            __m128d gradient45 = _mm_setzero_pd();
+        #else
+            double gradient[6] = {};
+        #endif
         corrcoef = 0.0;
-        for (int i=0; i<roi[0].cirroi[num_thread].region.noderange.height; i++) {
-            for (int j=0; j < roi[0].cirroi[num_thread].region.noderange.value[i]; j+=2) {
-                for (int k=roi[0].cirroi[num_thread].region.nodelist.value[i+j*roi[0].cirroi[num_thread].region.nodelist.height]; k<=roi[0].cirroi[num_thread].region.nodelist.value[i+(j+1)*roi[0].cirroi[num_thread].region.nodelist.height]; k++) {
-                    // Parameters
-                    int lind_f = k+(i+(roi[0].cirroi[num_thread].x-roi[0].cirroi[num_thread].radius))*reference[0].gs.height;
-                    int lind_df = ((k-roi[0].cirroi[num_thread].y)+roi[0].cirroi[num_thread].radius)*6+i*(roi[0].cirroi[num_thread].region.nodelist.height*6);
-                    int lind_g = (k-roi[0].cirroi[num_thread].y)+roi[0].cirroi[num_thread].radius+i*roi[0].cirroi[num_thread].region.nodelist.height;
-                    
-                    // Gradient Parameters
-                    double normalized_diff = (reference[0].gs.value[lind_f]-fm)*deltaf_inv-(g_buffer[num_thread][lind_g]-gm)*deltag_inv;
-                                       
-                    // Gradient
-                    gradient_buffer[num_thread][0] += normalized_diff*df_dp_buffer[num_thread][lind_df];
-                    gradient_buffer[num_thread][1] += normalized_diff*df_dp_buffer[num_thread][lind_df+1];
-                    gradient_buffer[num_thread][2] += normalized_diff*df_dp_buffer[num_thread][lind_df+2];
-                    gradient_buffer[num_thread][3] += normalized_diff*df_dp_buffer[num_thread][lind_df+3];
-                    gradient_buffer[num_thread][4] += normalized_diff*df_dp_buffer[num_thread][lind_df+4];
-                    gradient_buffer[num_thread][5] += normalized_diff*df_dp_buffer[num_thread][lind_df+5]; 
+        for (int i=0; i<columns; i++) {
+            for (int j=0; j<ranges[i]; j+=2) {
+                for (int k=nodes[i+j*subset_height]; k<=nodes[i+(j+1)*subset_height]; k++) {
+                    int lind_f = k+(i+(cx-subset_radius))*reference_height;
+                    int lind_df = ((k-cy)+subset_radius)*6+i*(subset_height*6);
+                    int lind_g = (k-cy)+subset_radius+i*subset_height;
+                    double normalized_diff = (reference_values[lind_f]-fm)*deltaf_inv-(g[lind_g]-gm)*deltag_inv;
+                    #ifdef NCORR_SSE2
+                        const __m128d diff = _mm_set1_pd(normalized_diff);
+                        gradient01 = _mm_add_pd(gradient01,_mm_mul_pd(diff,_mm_loadu_pd(df+lind_df)));
+                        gradient23 = _mm_add_pd(gradient23,_mm_mul_pd(diff,_mm_loadu_pd(df+lind_df+2)));
+                        gradient45 = _mm_add_pd(gradient45,_mm_mul_pd(diff,_mm_loadu_pd(df+lind_df+4)));
+                    #else
+                        for (int component=0; component<6; component++) {
+                            gradient[component] += normalized_diff*df[lind_df+component];
+                        }
+                    #endif
                     
                     // Correlation coefficient
                     corrcoef += normalized_diff*normalized_diff;
                 }
             }    
         }
+        #ifdef NCORR_SSE2
+            _mm_storeu_pd(gradient_buffer[num_thread].data(),gradient01);
+            _mm_storeu_pd(gradient_buffer[num_thread].data()+2,gradient23);
+            _mm_storeu_pd(gradient_buffer[num_thread].data()+4,gradient45);
+        #else
+            std::copy(gradient,gradient+6,gradient_buffer[num_thread].begin());
+        #endif
         
         // Update gradient; multiply by the inverses
         for (int i=0; i<6; i++) {

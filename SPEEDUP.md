@@ -7,18 +7,26 @@ The `speedup` branch improves the CPU implementation of `ncorr_alg_rgdic` withou
 - Parallelized interpolation-table and reference-gradient precomputation with OpenMP.
 - Removed redundant zero-initialization of buffers that are immediately overwritten. This avoids roughly 18–19 GiB of unnecessary memory writes for an 8K image.
 - Replaced dynamically allocated seed and deformation vectors with fixed-size arrays.
-- The inherited `speedup` branch uses Horner interpolation. `matlab_2026a` restores `develop`'s direct polynomial operation order: the real-data crop exposed differences above the required `1e-10` tolerance. Coordinate powers still use local fixed-size storage.
-- Replaced reference-variance and correlation `pow(x,2)` operations with multiplication and reused the Hessian scale factor. `matlab_2026a` retains the original `pow` expression for current-intensity variance: its multiplication replacement also failed the four-thread real-data equivalence criterion.
+- The inherited `speedup` branch uses Horner interpolation. `matlab_2026a` retains `develop`'s direct polynomial operation order instead. Coordinate powers use local fixed-size storage.
+- Replaced variance and correlation `pow(x,2)` operations with direct double multiplication and reused the Hessian scale factor. Current-intensity squaring avoids a general-purpose Microsoft runtime power call in each Newton pixel update.
+- Cached the fixed per-Newton subset geometry and buffer addresses. Independent interpolation-polynomial rows and gradient components use paired SSE2 double operations on supported x86 targets, with scalar fallbacks elsewhere. Each component retains its original accumulation order; this is not Horner reassociation or a parallel reduction.
 
 All interpolation coefficients and solver calculations remain double precision.
-The retained optimizations were compared against the original implementation;
-the two arithmetic transformations above were reverted rather than relaxing
-the displacement-equivalence tolerance. Synthetic regression checks are
+Direct multiplication can round differently from a runtime `pow(x,2)` call.
+This is an intentional arithmetic choice, not a promise of bitwise or
+`1e-10`-pixel equivalence to older binaries. Validate displacement differences
+and validity masks when comparing compiler builds or analysis versions.
+Synthetic regression checks are
 distributed as `test_ncorr_loadimgs.m` and `test_ncorr_rgdic_spacing.m`.
 
 Build with `ncorr_build_mex(true,4)` to enable OpenMP precomputation.
 Avoiding buffer zero-fill reduces memory writes, not the resident double
 coefficient-table size (roughly 18 GiB for an 8192-square image).
+
+The Newton hot-path changes add no per-point heap allocations and do not
+require AVX2, fast-math flags or changes to the configured worker count.
+Coordinate `floor`, correlation acceptance, convergence settings and the
+displacement-jump gate remain unchanged.
 
 ## Seed initial-guess search
 
